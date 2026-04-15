@@ -2,13 +2,14 @@
 gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
+current_plan: "01-02 complete — next: Phase 2 plans pending"
 status: executing
-last_updated: "2026-04-15T12:00:00.000Z"
+last_updated: "2026-04-15T15:17:11.654Z"
 progress:
   total_phases: 9
-  completed_phases: 0
+  completed_phases: 1
   total_plans: 3
-  completed_plans: 1
+  completed_plans: 3
 ---
 
 # Project State
@@ -49,11 +50,15 @@ See: .planning/PROJECT.md (updated 2026-04-15)
 | 01-02 | Used pip freeze for full pinned requirements.txt (217 packages); all key deps confirmed present |
 | 01-02 | .gitignore created fresh; excludes data/raw/, data/processed/, outputs/, logs/, .env, venv, __pycache__ |
 
+- [Phase 01-environment-scaffold]: Inline scripts (not pytest) used for test_ollama.py and test_icp_scorer.py — zero test framework overhead
+- [Phase 01-environment-scaffold]: ICP scorer expected values verified against rubric before writing tests — all 17 cases match icp_scorer.py logic exactly
+
 ## Performance Metrics
 
 | Phase | Plan | Duration | Tasks | Files |
 |-------|------|----------|-------|-------|
 | 1 | 01-02 | ~3 min | 2 | 2 |
+| Phase 01-environment-scaffold P03 | 6 | 2 tasks | 2 files |
 
 ## Notes
 
