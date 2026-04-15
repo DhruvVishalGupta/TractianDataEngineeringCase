@@ -12,7 +12,11 @@ A sales team must be able to open the output and immediately identify high-value
 
 ### Validated
 
-(None yet — ship to validate)
+- ✓ All 14 pipeline modules import cleanly (namespace packages, no `src/__init__.py` needed) — Phase 1
+- ✓ Ollama qwen2.5:7b callable via `classify_facility`; returns valid `OllamaFacilityResponse` — Phase 1
+- ✓ ICP scoring engine (all 4 dimensions) correct — 17/17 unit tests passed — Phase 1
+- ✓ Raw data store (`save_raw/load_raw/has_raw`) wired to `data/raw/{slug}/` — Phase 1
+- ✓ Failure logging (`log_failure`) writes to `logs/failures.log` — Phase 1
 
 ### Active
 
@@ -58,11 +62,12 @@ A sales team must be able to open the output and immediately identify high-value
 
 | Decision | Rationale | Outcome |
 |----------|-----------|---------|
-| Ollama qwen2.5:7b for all inference | Required by brief; local, free, deterministic at temp=0 | — Pending |
-| Multi-source pipeline (Firecrawl + Brave + Playwright + SEC EDGAR) | No single source is complete; triangulation = higher confidence | — Pending |
-| FastAPI + React/Vite stack | Standard, fast to build, professional output | — Pending |
-| Store raw scraped data per company | Enables re-running intelligence layer without re-scraping | — Pending |
-| Flat file row = one unique facility | CRM-ready format as required by brief | — Pending |
+| Ollama qwen2.5:7b for all inference | Required by brief; local, free, deterministic at temp=0 | ✓ Confirmed callable, 3/3 smoke tests pass |
+| Multi-source pipeline (Firecrawl + Brave + Playwright + SEC EDGAR) | No single source is complete; triangulation = higher confidence | — Pending (Phase 3) |
+| FastAPI + React/Vite stack | Standard, fast to build, professional output | — Pending (Phases 6-7) |
+| Store raw scraped data per company | Enables re-running intelligence layer without re-scraping | ✓ `raw_store.py` implemented and verified |
+| Flat file row = one unique facility | CRM-ready format as required by brief | — Pending (Phase 5) |
+| pip freeze for requirements.txt | Full environment reproducibility; 217 packages pinned | ✓ Phase 1 |
 
 ---
-*Last updated: 2026-04-15 after initial project setup*
+*Last updated: 2026-04-15 after Phase 1 (Environment & Scaffold)*
