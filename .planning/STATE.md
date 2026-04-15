@@ -24,9 +24,9 @@ See: .planning/PROJECT.md (updated 2026-04-15)
 
 **Phase 1** of 9 — Environment & Scaffold
 
-**Current Plan:** 01-01 complete — next: 01-02
+**Current Plan:** 01-02 complete — next: Phase 2 plans pending
 
-**Status:** Executing Phase 1 (Plan 01-01 complete)
+**Status:** Executing Phase 1 (Plans 01-01 and 01-02 complete)
 
 ## Phase History
 
@@ -42,8 +42,23 @@ See: .planning/PROJECT.md (updated 2026-04-15)
 | 8 | Full Pipeline Run & Integration Test | Pending | — |
 | 9 | README, Polish & Final Checklist | Pending | — |
 
+## Decisions
+
+| Phase | Decision |
+|-------|----------|
+| 01-02 | Used pip freeze for full pinned requirements.txt (217 packages); all key deps confirmed present |
+| 01-02 | .gitignore created fresh; excludes data/raw/, data/processed/, outputs/, logs/, .env, venv, __pycache__ |
+
+## Performance Metrics
+
+| Phase | Plan | Duration | Tasks | Files |
+|-------|------|----------|-------|-------|
+| 1 | 01-02 | ~3 min | 2 | 2 |
+
 ## Notes
 
 - Project initialized 2026-04-15
 - All 20 companies confirmed in company list
 - YOLO mode active — autonomous execution
+- Plan 01-02 complete: requirements.txt (217 pkgs) + .gitignore created and committed (46f4f4d)
+- Last session: 2026-04-15 — Stopped at: Completed 01-02-PLAN.md
