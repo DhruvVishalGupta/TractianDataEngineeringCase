@@ -39,10 +39,11 @@ Phase 1 → Phase 2 → Phase 3 → Phase 4 → Phase 5
 
 **Goal:** ICP scoring engine implemented and tested, company list finalized with metadata
 
-**Plans:**
-1. Implement ICP scorer module (icp_scorer.py) with all 4 dimensions, confidence logic, score breakdown structure
-2. Write unit tests for scorer with edge cases (all zeros, all max, mixed, private companies)
-3. Create company registry (companies.py) with all 20 companies, domains, known industries
+**Plans:** 2 plans
+
+Plans:
+- [ ] 02-01-PLAN.md — Verify schema.py completeness + extend test suite to 19 tests (2 edge cases)
+- [ ] 02-02-PLAN.md — Create src/pipeline/companies.py with all 20 typed Company entries
 
 **Covers:** INTEL-01, INTEL-02, INTEL-03
 
