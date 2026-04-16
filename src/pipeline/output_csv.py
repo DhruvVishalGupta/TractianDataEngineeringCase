@@ -5,18 +5,23 @@ from __future__ import annotations
 import csv
 import json
 from pathlib import Path
-from .schema import FinalRow
 from .config import OUTPUTS_DIR
 from .logger import get_logger
 
 log = get_logger("output_csv")
 
 CSV_COLUMNS = [
-    "company_name", "website", "icp_score", "score_breakdown",
-    "facility_location", "city", "state_region", "country",
-    "lat", "lon", "facility_type", "classification_basis",
-    "confidence", "needs_verification", "source_url",
-    "source_type", "source_count", "date_collected",
+    # ── PDF sample columns, in PDF order, for direct CRM/map import ──
+    "company_name", "website", "icp_score", "facility_location", "facility_type",
+    # ── Location breakdown (map-ready) ──
+    "city", "state_region", "country", "lat", "lon",
+    # ── Confidence + provenance ──
+    "classification_basis", "confidence", "needs_verification",
+    "source_url", "source_type", "source_count",
+    "osint_corroboration", "primary_source_tier",
+    # ── Extra context ──
+    "reclassification_note", "confidence_boost_reason",
+    "score_breakdown", "date_collected",
 ]
 
 

@@ -25,9 +25,10 @@ def get_logger(name: str = "pipeline") -> logging.Logger:
         datefmt="%H:%M:%S"
     )
 
-    # File handler — full debug log
+    # File handler — captures INFO+ (drop DEBUG in production to keep logs readable;
+    # flip to DEBUG locally when tracing why a specific facility was dropped).
     fh = logging.FileHandler(LOG_FILE, encoding="utf-8")
-    fh.setLevel(logging.DEBUG)
+    fh.setLevel(logging.INFO)
     fh.setFormatter(fmt)
 
     # Console handler — INFO+ only, tqdm-compatible

@@ -43,3 +43,7 @@ Thumbs.db
 # Jupyter
 .ipynb_checkpoints/
 *.ipynb
+
+# Dashboard dependencies / build artifacts
+src/dashboard/node_modules/
+src/dashboard/dist/

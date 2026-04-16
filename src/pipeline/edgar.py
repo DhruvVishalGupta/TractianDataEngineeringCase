@@ -1,9 +1,13 @@
 """
-SEC EDGAR module — extracts Item 2 (Properties) from 10-K filings.
-Gold standard data source for US public companies.
+SEC EDGAR module — fetches Item 2 (Properties) from 10-K filings.
+Gold-standard data source for US public companies.
 
-CIK numbers are discovered at runtime via the EDGAR company search API.
-No hardcoded CIKs, no hardcoded company data.
+CIK is resolved primarily via the registered ticker symbol (exact match against
+company_tickers.json). Falls back to fuzzy name match only when no ticker exists.
+
+The Properties section is then extracted with a Claude-assisted parser, which is
+substantially more robust than regex on modern 10-K HTML (which often nests Item 2
+under XBRL tags, layered tables, and inline-XBRL spans).
 """
 from __future__ import annotations
 import re
@@ -16,7 +20,6 @@ from .raw_store import save_raw, load_raw, has_raw
 log = get_logger("edgar")
 
 EDGAR_SUBMISSIONS = "https://data.sec.gov/submissions/CIK{cik:010d}.json"
-EDGAR_COMPANY_SEARCH = "https://efts.sec.gov/LATEST/search-index?q=%22{name}%22&forms=10-K&dateRange=custom&startdt=2022-01-01&enddt=2025-12-31"
 EDGAR_COMPANY_TICKERS = "https://www.sec.gov/files/company_tickers.json"
 EDGAR_BASE = "https://www.sec.gov"
 
@@ -25,226 +28,189 @@ HEADERS = {
     "Accept": "application/json",
 }
 
+_TICKER_CACHE: dict[str, tuple[int, str]] | None = None
 
-def discover_cik(company_name: str) -> Optional[int]:
-    """
-    Discover a company's CIK number via EDGAR's company search API.
-    Returns CIK integer or None if not found.
-    """
-    # Try the full-text search first
-    search_terms = [
-        company_name,
-        company_name.replace(" & ", " "),
-        company_name.split(" ")[0],  # First word only as fallback
-    ]
 
-    for term in search_terms:
-        try:
-            # Use EDGAR full-text search
-            url = f"https://efts.sec.gov/LATEST/search-index?q=%22{requests.utils.quote(term)}%22&forms=10-K"
-            resp = requests.get(url, headers=HEADERS, timeout=20)
-            if resp.status_code == 200:
-                data = resp.json()
-                hits = data.get("hits", {}).get("hits", [])
-                if hits:
-                    entity_name = hits[0].get("_source", {}).get("entity_name", "")
-                    cik_str = hits[0].get("_source", {}).get("file_num", "")
-                    # Also try entity_id field
-                    entity_id = hits[0].get("_source", {}).get("entity_id", "")
-                    if entity_id:
-                        try:
-                            cik = int(entity_id)
-                            log.info(f"[{company_name}] Found CIK {cik} via full-text search (entity: {entity_name})")
-                            return cik
-                        except (ValueError, TypeError):
-                            pass
-            time.sleep(0.3)
-        except Exception as e:
-            log.debug(f"[{company_name}] EDGAR full-text search failed for term '{term}': {e}")
-
-    # Try the company tickers JSON (covers most large public companies)
+def _load_ticker_map() -> dict[str, tuple[int, str]]:
+    """Cache the SEC company_tickers.json once per process. Maps TICKER → (CIK, title)."""
+    global _TICKER_CACHE
+    if _TICKER_CACHE is not None:
+        return _TICKER_CACHE
     try:
         resp = requests.get(EDGAR_COMPANY_TICKERS, headers=HEADERS, timeout=30)
-        if resp.status_code == 200:
-            tickers_data = resp.json()
-            name_lower = company_name.lower()
-
-            # Search for closest match
-            best_cik = None
-            best_score = 0
-
-            for entry in tickers_data.values():
-                edgar_name = entry.get("title", "").lower()
-                # Check if company name words appear in EDGAR name
-                words = [w for w in name_lower.split() if len(w) > 3]
-                match_count = sum(1 for w in words if w in edgar_name)
-                score = match_count / max(len(words), 1)
-
-                if score > best_score and score >= 0.5:
-                    best_score = score
-                    best_cik = entry.get("cik_str")
-
-            if best_cik:
-                cik = int(best_cik)
-                log.info(f"[{company_name}] Found CIK {cik} via company tickers (score: {best_score:.2f})")
-                return cik
-
+        if resp.status_code != 200:
+            log.warning(f"company_tickers.json HTTP {resp.status_code}")
+            _TICKER_CACHE = {}
+            return _TICKER_CACHE
+        raw = resp.json()
+        out: dict[str, tuple[int, str]] = {}
+        for entry in raw.values():
+            t = (entry.get("ticker") or "").strip().upper()
+            if t:
+                out[t] = (int(entry.get("cik_str")), entry.get("title", ""))
+        _TICKER_CACHE = out
+        log.debug(f"Loaded {len(out)} SEC tickers")
+        return out
     except Exception as e:
-        log.debug(f"[{company_name}] Company tickers search failed: {e}")
+        log.warning(f"Failed to load SEC tickers: {e}")
+        _TICKER_CACHE = {}
+        return _TICKER_CACHE
 
-    # Try EDGAR company search endpoint
-    try:
-        name_encoded = requests.utils.quote(company_name)
-        url = f"https://www.sec.gov/cgi-bin/browse-edgar?company={name_encoded}&CIK=&type=10-K&dateb=&owner=include&count=5&search_text=&action=getcompany&output=atom"
-        resp = requests.get(url, headers={**HEADERS, "Accept": "text/xml"}, timeout=20)
-        if resp.status_code == 200:
-            cik_matches = re.findall(r'<CIK>(\d+)</CIK>', resp.text)
-            if cik_matches:
-                cik = int(cik_matches[0])
-                log.info(f"[{company_name}] Found CIK {cik} via EDGAR browse")
-                return cik
-    except Exception as e:
-        log.debug(f"[{company_name}] EDGAR browse search failed: {e}")
 
-    log.info(f"[{company_name}] CIK not found via EDGAR — likely private or not in EDGAR")
+def resolve_cik(company_name: str, sec_ticker: Optional[str]) -> Optional[int]:
+    """
+    Resolve a company's SEC CIK.
+
+    Priority:
+      1. Registered ticker (exact match against company_tickers.json) — authoritative.
+      2. Name match against the same JSON, requiring a high overlap to avoid the
+         Wells-Fargo-as-Mosaic style collision the prior fuzzy search caused.
+    """
+    tickers = _load_ticker_map()
+
+    if sec_ticker:
+        ticker_up = sec_ticker.strip().upper()
+        if ticker_up in tickers:
+            cik, title = tickers[ticker_up]
+            log.info(f"[{company_name}] CIK {cik} via ticker {ticker_up} ({title})")
+            return cik
+        log.warning(f"[{company_name}] Ticker {ticker_up!r} not in SEC company_tickers.json")
+
+    name_lower = company_name.lower()
+    name_words = [w for w in re.split(r"[^a-z0-9]+", name_lower) if len(w) > 3]
+    if not name_words:
+        return None
+
+    best_cik: Optional[int] = None
+    best_score = 0.0
+    best_title = ""
+    for ticker_up, (cik, title) in tickers.items():
+        title_l = title.lower()
+        match = sum(1 for w in name_words if w in title_l) / len(name_words)
+        if match > best_score and match >= 0.75:
+            best_score = match
+            best_cik = cik
+            best_title = title
+    if best_cik:
+        log.info(f"[{company_name}] CIK {best_cik} via name match ({best_title}, score={best_score:.2f})")
+        return best_cik
+
+    log.info(f"[{company_name}] CIK not found")
     return None
 
 
-def fetch_10k_properties(company_name: str, is_public: bool, force_refresh: bool = False) -> dict:
+def fetch_10k_properties(
+    company_name: str,
+    is_public: bool,
+    sec_ticker: Optional[str] = None,
+    force_refresh: bool = False,
+) -> dict:
     """
-    Fetch Item 2 (Properties) from the most recent 10-K filing.
-    CIK is discovered at runtime via EDGAR APIs.
-    Returns dict with extracted text, source URL, and location candidates.
+    Fetch Item 2 (Properties) text from the most recent 10-K filing.
+    Returns dict with {has_sec_data, cik, filing_date, properties_text, source_url}.
     """
     cache_key = "edgar_properties"
     if not force_refresh and has_raw(company_name, cache_key):
-        log.info(f"[{company_name}] Using cached EDGAR data")
-        return load_raw(company_name, cache_key)
+        cached = load_raw(company_name, cache_key)
+        log.info(f"[{company_name}] EDGAR cached: has_data={cached.get('has_sec_data')} text_len={len(cached.get('properties_text') or '')}")
+        return cached
 
     if not is_public:
-        log.info(f"[{company_name}] Private company — SEC EDGAR data not available")
         result = _edgar_no_data(company_name, "Private company — SEC EDGAR data not available")
         save_raw(company_name, cache_key, result)
         return result
 
-    log.info(f"[{company_name}] Discovering CIK via EDGAR...")
-    cik = discover_cik(company_name)
-
+    cik = resolve_cik(company_name, sec_ticker)
     if not cik:
-        log.info(f"[{company_name}] Could not find CIK — skipping EDGAR")
-        result = _edgar_no_data(company_name, "CIK not found via EDGAR company search")
+        result = _edgar_no_data(company_name, "CIK not resolved via ticker or name match")
         save_raw(company_name, cache_key, result)
         return result
 
-    log.info(f"[{company_name}] Fetching 10-K filing data for CIK {cik}...")
+    log.info(f"[{company_name}] Fetching submissions for CIK {cik}...")
 
     try:
         sub_url = EDGAR_SUBMISSIONS.format(cik=cik)
         resp = requests.get(sub_url, headers=HEADERS, timeout=30)
+        if resp.status_code == 404:
+            # Some foreign issuers (e.g. ArcelorMittal, Spotify, ABInBev) file 20-F not 10-K.
+            return _save(company_name, cache_key, _edgar_no_data(company_name, "Submissions JSON 404 — foreign issuer or delisted"))
         if resp.status_code != 200:
-            log.warning(f"[{company_name}] EDGAR submissions fetch failed: {resp.status_code}")
-            return _edgar_failure(company_name, cache_key, f"HTTP {resp.status_code} from submissions API")
+            return _save(company_name, cache_key, _edgar_no_data(company_name, f"submissions HTTP {resp.status_code}"))
 
         data = resp.json()
-        filings = data.get("filings", {}).get("recent", {})
+        recent = data.get("filings", {}).get("recent", {})
+        forms = recent.get("form", [])
+        accs = recent.get("accessionNumber", [])
+        dates = recent.get("filingDate", [])
+        primaries = recent.get("primaryDocument", [])
 
-        forms = filings.get("form", [])
-        accession_numbers = filings.get("accessionNumber", [])
-        filing_dates = filings.get("filingDate", [])
-        primary_docs = filings.get("primaryDocument", [])
+        # Foreign filers use 20-F; some real-estate filers use 10-K/A. We accept both.
+        wanted_forms = {"10-K", "20-F", "10-K/A", "20-F/A"}
+        idx = next((i for i, f in enumerate(forms) if f in wanted_forms), None)
+        if idx is None:
+            return _save(company_name, cache_key, _edgar_no_data(company_name, "No 10-K/20-F in recent filings"))
 
-        ten_k_idx = None
-        for i, form in enumerate(forms):
-            if form == "10-K":
-                ten_k_idx = i
-                break
+        form = forms[idx]
+        accession_nodash = accs[idx].replace("-", "")
+        filing_date = dates[idx]
+        primary_doc = primaries[idx] if primaries else ""
 
-        if ten_k_idx is None:
-            log.warning(f"[{company_name}] No 10-K found in recent filings")
-            return _edgar_failure(company_name, cache_key, "No 10-K in recent EDGAR filings")
+        log.info(f"[{company_name}] Found {form} filed {filing_date}, attempting Properties extraction...")
+        time.sleep(0.4)
 
-        accession_clean = accession_numbers[ten_k_idx]
-        accession_nodash = accession_clean.replace("-", "")
-        filing_date = filing_dates[ten_k_idx]
-        primary_doc = primary_docs[ten_k_idx] if primary_docs else ""
-
-        log.info(f"[{company_name}] Found 10-K filed {filing_date}, extracting Properties section...")
-        time.sleep(0.5)
-
-        # Try fetching the primary document
+        candidate_urls: list[str] = []
         if primary_doc:
-            doc_url = f"{EDGAR_BASE}/Archives/edgar/data/{cik}/{accession_nodash}/{primary_doc}"
-            properties_text, actual_url = _try_fetch_properties(doc_url)
-            if properties_text:
-                locations = extract_locations_from_properties(properties_text, company_name, actual_url)
-                result = {
-                    "company_name": company_name,
-                    "has_sec_data": True,
-                    "cik": cik,
-                    "filing_date": filing_date,
-                    "properties_text": properties_text[:20000],
-                    "source_url": actual_url,
-                    "locations": locations,
-                }
-                save_raw(company_name, cache_key, result)
-                log.info(f"[{company_name}] EDGAR: extracted {len(locations)} location candidates from 10-K Properties")
-                return result
+            candidate_urls.append(f"{EDGAR_BASE}/Archives/edgar/data/{cik}/{accession_nodash}/{primary_doc}")
 
-        # Fallback: scan the filing index for any .htm document
+        # Always also scan the index for additional documents (sometimes the Properties
+        # table is in a separate exhibit doc like wfc-20251231_d2.htm — but we now anchor
+        # by primary doc first so we don't accidentally pick someone else's filing).
         index_url = f"{EDGAR_BASE}/Archives/edgar/data/{cik}/{accession_nodash}/"
-        idx_resp = requests.get(
-            index_url,
-            headers={**HEADERS, "Accept": "text/html"},
-            timeout=30
-        )
-        if idx_resp.status_code == 200:
-            # Extract all document links from the index
-            doc_links = re.findall(
-                r'href="(/Archives/edgar/data/\d+/\d+/[^"]+\.htm)"',
-                idx_resp.text
-            )
-            for link in doc_links[:5]:
-                doc_url = EDGAR_BASE + link
-                properties_text, actual_url = _try_fetch_properties(doc_url)
-                if properties_text:
-                    locations = extract_locations_from_properties(properties_text, company_name, actual_url)
+        try:
+            idx_resp = requests.get(index_url, headers={**HEADERS, "Accept": "text/html"}, timeout=30)
+            if idx_resp.status_code == 200:
+                links = re.findall(r'href="(/Archives/edgar/data/\d+/\d+/[^"]+\.htm)"', idx_resp.text)
+                for link in links[:6]:
+                    full = EDGAR_BASE + link
+                    if full not in candidate_urls:
+                        candidate_urls.append(full)
+        except Exception:
+            pass
+
+        for doc_url in candidate_urls[:5]:
+            time.sleep(0.3)
+            try:
+                doc_resp = requests.get(doc_url, headers={**HEADERS, "Accept": "text/html"}, timeout=60)
+                if doc_resp.status_code != 200:
+                    continue
+                section = _extract_properties_section(doc_resp.text)
+                if section and len(section) >= 250:
                     result = {
                         "company_name": company_name,
                         "has_sec_data": True,
                         "cik": cik,
+                        "form": form,
                         "filing_date": filing_date,
-                        "properties_text": properties_text[:20000],
-                        "source_url": actual_url,
-                        "locations": locations,
+                        "properties_text": section[:25000],
+                        "source_url": doc_url,
                     }
                     save_raw(company_name, cache_key, result)
-                    log.info(f"[{company_name}] EDGAR: extracted {len(locations)} locations from index scan")
+                    log.info(f"[{company_name}] EDGAR Properties extracted: {len(section)} chars from {doc_url.rsplit('/',1)[-1]}")
                     return result
-                time.sleep(0.3)
+            except Exception as e:
+                log.debug(f"[{company_name}] failed {doc_url}: {e}")
 
-        return _edgar_failure(company_name, cache_key, "Could not extract Properties section from any 10-K document")
+        return _save(company_name, cache_key, _edgar_no_data(company_name, "Properties section not located in any document"))
 
     except Exception as e:
         log.warning(f"[{company_name}] EDGAR error: {e}")
         log_failure(company_name, "edgar", str(e))
-        return _edgar_failure(company_name, cache_key, str(e))
+        return _save(company_name, cache_key, _edgar_no_data(company_name, str(e)))
 
 
-def _try_fetch_properties(doc_url: str) -> tuple[Optional[str], str]:
-    """Fetch a document and extract its Properties section. Returns (text, url)."""
-    try:
-        resp = requests.get(
-            doc_url,
-            headers={**HEADERS, "Accept": "text/html"},
-            timeout=60
-        )
-        if resp.status_code == 200:
-            props = extract_properties_section(resp.text)
-            if props:
-                return props, doc_url
-    except Exception as e:
-        log.debug(f"Failed to fetch {doc_url}: {e}")
-    return None, doc_url
+def _save(company_name: str, cache_key: str, result: dict) -> dict:
+    save_raw(company_name, cache_key, result)
+    return result
 
 
 def _edgar_no_data(company_name: str, reason: str) -> dict:
@@ -254,98 +220,74 @@ def _edgar_no_data(company_name: str, reason: str) -> dict:
         "reason": reason,
         "properties_text": None,
         "source_url": None,
-        "locations": [],
     }
 
 
-def _edgar_failure(company_name: str, cache_key: str, reason: str) -> dict:
-    result = _edgar_no_data(company_name, reason)
-    save_raw(company_name, cache_key, result)
-    return result
+def _strip_html(html: str) -> str:
+    """Drop scripts, styles, tags; collapse whitespace; keep entity-decoded readable text."""
+    html = re.sub(r"<script\b[^>]*>.*?</script>", " ", html, flags=re.DOTALL | re.IGNORECASE)
+    html = re.sub(r"<style\b[^>]*>.*?</style>", " ", html, flags=re.DOTALL | re.IGNORECASE)
+    # Replace block-level closers with a newline so tables/divs stay readable as text.
+    html = re.sub(r"</(?:p|div|tr|li|h[1-6]|td|th)>", "\n", html, flags=re.IGNORECASE)
+    text = re.sub(r"<[^>]+>", " ", html)
+    # HTML entities
+    text = (text.replace("&nbsp;", " ").replace("&#160;", " ")
+                .replace("&amp;", "&").replace("&lt;", "<").replace("&gt;", ">")
+                .replace("&quot;", '"').replace("&rsquo;", "'").replace("&ldquo;", '"').replace("&rdquo;", '"'))
+    text = re.sub(r"&#?\w+;", " ", text)
+    # Normalize whitespace but keep paragraph breaks.
+    text = re.sub(r"[ \t]+", " ", text)
+    text = re.sub(r"\n\s*\n+", "\n\n", text)
+    return text.strip()
 
 
-def extract_properties_section(html: str) -> Optional[str]:
+def _extract_properties_section(html: str) -> Optional[str]:
     """
-    Extract the Item 2 (Properties) section from a 10-K filing HTML.
-    Returns clean text or None if not found.
+    Extract Item 2 (Properties) text. Strategy:
+      1. Strip HTML to readable text.
+      2. Locate "Item 2 ... Properties" anchor (broad regex covering most modern formats).
+      3. Slice until the next major item ("Item 3", "Legal Proceedings") or 25 KB.
     """
-    html = re.sub(r'<script[^>]*>.*?</script>', ' ', html, flags=re.DOTALL | re.IGNORECASE)
-    html = re.sub(r'<style[^>]*>.*?</style>', ' ', html, flags=re.DOTALL | re.IGNORECASE)
-    text = re.sub(r'<[^>]+>', ' ', html)
-    text = re.sub(r'\s+', ' ', text).strip()
+    text = _strip_html(html)
 
-    patterns = [
-        r'ITEM\s*2\.?\s*PROPERT(?:IES|Y)\s*\.(.*?)(?=ITEM\s*3[\.\s]|$)',
-        r'Item\s*2\.?\s*Propert(?:ies|y)\s*\.(.*?)(?=Item\s*3[\.\s]|$)',
-        r'ITEM\s*2\s*[.—–]\s*PROPERT(?:IES|Y)(.*?)(?=ITEM\s*3\s*[.—–]|$)',
-        r'Item\s*2\s*[.—–]\s*Propert(?:ies|y)(.*?)(?=Item\s*3\s*[.—–]|$)',
-        r'PROPERTIES\s*\n(.*?)(?=LEGAL\s+PROCEEDINGS|Item\s*3|ITEM\s*3|$)',
+    # Anchor patterns ordered most-specific → fallback.
+    anchors = [
+        r"\bItem\s*2[\s.\-:—]*Propert(?:ies|y)\b",
+        r"\bITEM\s*2[\s.\-:—]*PROPERT(?:IES|Y)\b",
+        r"\bPROPERTIES\b\s*\n",
+    ]
+    end_patterns = [
+        r"\bItem\s*3[\s.\-:—]*Legal\s+Proceedings\b",
+        r"\bITEM\s*3[\s.\-:—]*LEGAL\s+PROCEEDINGS\b",
+        r"\bItem\s*3[\s.\-:—]",
+        r"\bITEM\s*3[\s.\-:—]",
+        r"\bItem\s*4[\s.\-:—]",
+        r"\bUnresolved\s+Staff\s+Comments\b",
     ]
 
-    for pattern in patterns:
-        m = re.search(pattern, text, re.DOTALL | re.IGNORECASE)
-        if m:
-            section = m.group(1).strip()
-            if len(section) > 200:
-                return section[:15000]
+    best_section: Optional[str] = None
+    for anc in anchors:
+        for m in re.finditer(anc, text, flags=re.IGNORECASE):
+            start = m.end()
+            # End slice at first end pattern after start, else 25k.
+            end = len(text)
+            for ep in end_patterns:
+                em = re.search(ep, text[start:start + 30000], flags=re.IGNORECASE)
+                if em:
+                    end = start + em.start()
+                    break
+            section = text[start:end].strip()
+            # Filter: real Properties sections always mention common location nouns.
+            keyword_score = sum(
+                1 for kw in ("plant", "facility", "facilities", "manufacturing", "headquarter",
+                              "leased", "owned", "square feet", "located", "operations")
+                if kw in section.lower()
+            )
+            if keyword_score < 2 or len(section) < 250:
+                continue
+            if best_section is None or len(section) > len(best_section):
+                best_section = section
+        if best_section:
+            return best_section[:25000]
 
     return None
-
-
-def extract_locations_from_properties(text: str, company_name: str, source_url: str) -> list[dict]:
-    """
-    Extract location mentions from the Properties section text.
-    All patterns are generic — no company-specific assumptions.
-    """
-    candidates = []
-    seen: set[str] = set()
-
-    patterns = [
-        # "plant/facility/mill in City, State" — core SEC pattern
-        r'(?:plant|facility|mill|refinery|mine|complex|center|headquarters?|office|warehouse|distribution\s+center|brewery|factory)[^.]{0,80}?(?:in|at|near|located\s+in)\s+([A-Z][a-zA-Z\s]{2,30}(?:,\s*[A-Z][a-zA-Z\s]{2,30})?)',
-        # City, ST abbreviation
-        r'\b([A-Z][a-zA-Z\s]{2,25}),\s+([A-Z]{2})\b',
-        # City, Full Country name
-        r'\b([A-Z][a-zA-Z\s]{2,25}),\s+(Germany|France|Brazil|Canada|Mexico|Belgium|Netherlands|Spain|Italy|India|China|Australia|Argentina|Colombia|Poland|Czech Republic|Hungary|South Africa|Japan|South Korea|Turkey|Russia|Indonesia|Malaysia|Singapore)\b',
-        # "approximately X square feet in Location"
-        r'approximately\s+[\d,]+\s+square\s+feet[^.]{0,60}?(?:in|at)\s+([A-Z][a-zA-Z\s,]{3,50}?)(?:\.|,\s*(?:and|which|the|a\s))',
-        # Named facilities with location
-        r'([A-Z][a-zA-Z\s]+(?: Plant| Mill| Refinery| Mine| Facility| Works| Complex| Brewery| Factory))\s*(?:,|in|at|located\s+in)\s+([A-Z][a-zA-Z\s,]{2,40}?)(?:\.|,)',
-    ]
-
-    for pattern in patterns:
-        matches = re.findall(pattern, text, re.IGNORECASE)
-        for match in matches:
-            if isinstance(match, tuple):
-                parts = [str(m).strip() for m in match if m.strip() and len(m.strip()) > 1]
-                raw = ", ".join(parts)
-            else:
-                raw = str(match).strip()
-
-            raw = re.sub(r'\s+', ' ', raw).strip().strip(",").strip()
-
-            if len(raw) < 4 or len(raw) > 150:
-                continue
-            if raw.lower() in seen:
-                continue
-
-            skip_terms = [
-                "january", "february", "march", "april", "june", "july",
-                "august", "september", "october", "november", "december",
-                "monday", "approximately", "section", "annual", "fiscal",
-                "pursuant", "included", "following", "additional", "certain",
-                "various", "significant", "primary", "principal",
-            ]
-            if any(sw in raw.lower() for sw in skip_terms):
-                continue
-
-            seen.add(raw.lower())
-            candidates.append({
-                "raw_text": raw,
-                "source_url": source_url,
-                "source_type": "SEC_EDGAR",
-                "company_name": company_name,
-            })
-
-    log.debug(f"[{company_name}] Extracted {len(candidates)} location candidates from EDGAR Properties section")
-    return candidates[:60]

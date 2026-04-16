@@ -1,147 +1,103 @@
 """
-Deduplication module — merges location candidates by fuzzy city+country match.
-Tracks source URLs and source counts per unique location.
+Deduplicator module.
+Merges likely duplicate candidate objects while preserving distinct same-city facilities.
+Applies cross-source corroboration: facilities found in multiple independent sources
+(e.g. EDGAR + website) get a confidence boost.
 """
-from __future__ import annotations
-from typing import Optional
-from rapidfuzz import fuzz
-from .logger import get_logger
+from typing import List, Dict
 
-log = get_logger("deduplicator")
-
-SIMILARITY_THRESHOLD = 85  # % similarity for fuzzy match
+CONFIDENCE_RANK = {"HIGH": 4, "MED": 3, "LOW": 2, "ESTIMATED": 1}
 
 
-def normalize_city(city: str) -> str:
-    """Normalize city name for comparison."""
-    if not city:
-        return ""
-    city = city.strip().lower()
-    # Common abbreviations
-    replacements = {
-        "st.": "saint",
-        "st ": "saint ",
-        "ft.": "fort",
-        "ft ": "fort ",
-        "mt.": "mount",
-        "mt ": "mount ",
-    }
-    for old, new in replacements.items():
-        city = city.replace(old, new)
-    return city
-
-
-def normalize_country(country: str) -> str:
-    """Normalize country name for comparison."""
-    if not country:
-        return ""
-    country = country.strip().lower()
-    # Common variations
-    aliases = {
-        "usa": "united states",
-        "us": "united states",
-        "u.s.": "united states",
-        "u.s.a.": "united states",
-        "uk": "united kingdom",
-        "u.k.": "united kingdom",
-        "great britain": "united kingdom",
-    }
-    return aliases.get(country, country)
-
-
-def location_key(city: Optional[str], country: Optional[str]) -> str:
-    """Generate a normalized key for deduplication."""
-    city_norm = normalize_city(city or "")
-    country_norm = normalize_country(country or "")
-    return f"{city_norm}|{country_norm}"
-
-
-def are_same_location(
-    city1: Optional[str],
-    country1: Optional[str],
-    city2: Optional[str],
-    country2: Optional[str],
-) -> bool:
-    """Check if two locations refer to the same place using fuzzy matching."""
-    if not city1 and not city2:
-        return False  # Both unknown — don't merge
-
-    key1 = location_key(city1, country1)
-    key2 = location_key(city2, country2)
-
-    if not key1 or not key2:
-        return False
-
-    # Exact match after normalization
-    if key1 == key2:
-        return True
-
-    # Fuzzy match
-    similarity = fuzz.ratio(key1, key2)
-    return similarity >= SIMILARITY_THRESHOLD
-
-
-def deduplicate_facilities(facilities: list[dict]) -> list[dict]:
+def _boost_confidence(current: str, source_count: int) -> str:
     """
-    Merge duplicate facilities. A duplicate is defined as having the same
-    city + country (fuzzy matched). Merge by keeping the higher-confidence
-    entry and accumulating all source URLs.
-
-    Input: list of dicts with keys: city, country, source_url, source_type,
-           confidence, facility_type, classification_basis, facility_location, etc.
-    Output: deduplicated list with source_count and all_source_urls fields.
+    Promote confidence when a facility is corroborated by multiple independent sources.
     """
-    merged = []
+    rank = CONFIDENCE_RANK.get(current, 1)
+    if source_count >= 3:
+        rank = max(rank, 4)  # → HIGH
+    elif source_count >= 2:
+        rank = min(rank + 1, 4)  # one tier up
+    for label, r in CONFIDENCE_RANK.items():
+        if r == rank:
+            return label
+    return current
 
-    for facility in facilities:
-        city = facility.get("city")
-        country = facility.get("country")
-        source_url = facility.get("source_url", "")
-        facility_copy = dict(facility)
 
-        # Find existing match
-        found_match = None
-        for existing in merged:
-            if are_same_location(city, country, existing.get("city"), existing.get("country")):
-                found_match = existing
+def deduplicate_facilities(facilities: List[Dict]) -> List[Dict]:
+    """
+    Remove duplicate facilities extracted by Claude without over-collapsing.
+    We use city+country+facility_type as the primary key and then fold entries
+    with identical or near-identical raw location strings within that bucket.
+
+    Cross-source corroboration: when the same facility appears from multiple
+    independent source URLs, confidence is boosted.
+    """
+    unique_map: Dict[str, Dict] = {}
+
+    for f in facilities:
+        city = str(f.get("city", "")).strip().lower()
+        country = str(f.get("country", "")).strip().lower()
+        ftype = str(f.get("facility_type", "Unknown")).strip().lower()
+        location = str(f.get("facility_location", "")).strip().lower()
+        location_norm = " ".join(
+            location.replace(",", " ").replace("-", " ").replace("/", " ").split()
+        )
+
+        key = f"{city}|{country}|{ftype}|{location_norm}"
+        loose_key = f"{city}|{country}|{ftype}|"
+
+        existing_key = None
+        for k in unique_map.keys():
+            if not k.startswith(loose_key):
+                continue
+            existing_loc = k.split("|", 3)[-1]
+            if not existing_loc or not location_norm:
+                existing_key = k
+                break
+            if location_norm in existing_loc or existing_loc in location_norm:
+                existing_key = k
                 break
 
-        if found_match:
-            # Merge — accumulate sources
-            existing_urls = found_match.get("all_source_urls", [found_match.get("source_url", "")])
-            if source_url not in existing_urls:
-                existing_urls.append(source_url)
-            found_match["all_source_urls"] = existing_urls
-            found_match["source_count"] = len([u for u in existing_urls if u])
+        if existing_key:
+            existing = unique_map[existing_key]
+            existing_basis = str(existing.get("classification_basis", "")).strip()
+            new_basis = str(f.get("classification_basis", "")).strip()
+            if new_basis and new_basis not in existing_basis:
+                existing["classification_basis"] = (
+                    f"{existing_basis}; {new_basis}" if existing_basis else new_basis
+                )
 
-            # Use MULTIPLE source type if more than one source
-            if found_match["source_count"] > 1:
-                source_types = set()
-                for u in existing_urls:
-                    st = facility.get("source_type", "UNKNOWN")
-                    source_types.add(st)
-                found_match["source_type"] = "MULTIPLE" if len(source_types) > 1 else found_match.get("source_type")
-                found_match["source_url"] = existing_urls[0]  # Primary source
+            all_urls = set(existing.get("all_source_urls", []))
+            new_url = str(f.get("source_url", "")).strip()
+            if new_url:
+                all_urls.add(new_url)
+            existing_url = str(existing.get("source_url", "")).strip()
+            if existing_url:
+                all_urls.add(existing_url)
+            all_urls.discard("")
 
-            # Upgrade confidence if new source adds corroboration
-            confidence_rank = {"HIGH": 3, "MED": 2, "LOW": 1, "ESTIMATED": 0}
-            current_conf = found_match.get("confidence", "LOW")
-            new_conf = facility_copy.get("confidence", "LOW")
-            if confidence_rank.get(new_conf, 0) > confidence_rank.get(current_conf, 0):
-                found_match["confidence"] = new_conf
-                found_match["classification_basis"] = facility_copy.get("classification_basis", found_match.get("classification_basis"))
+            existing["all_source_urls"] = sorted(all_urls)
+            existing["source_count"] = len(all_urls)
 
-            # If multiple sources now corroborate, upgrade to HIGH
-            if found_match["source_count"] >= 2 and found_match.get("confidence") in ["MED", "LOW"]:
-                found_match["confidence"] = "HIGH"
-                found_match["needs_verification"] = False
-
+            # Keep the higher-confidence entry's base fields
+            if CONFIDENCE_RANK.get(f.get("confidence", ""), 0) > CONFIDENCE_RANK.get(existing.get("confidence", ""), 0):
+                existing["confidence"] = f["confidence"]
+                existing["source_url"] = f.get("source_url", existing.get("source_url", ""))
         else:
-            # New unique location
-            facility_copy["all_source_urls"] = [source_url] if source_url else []
-            facility_copy["source_count"] = 1
-            facility_copy.setdefault("needs_verification", True)
-            merged.append(facility_copy)
+            new_url = str(f.get("source_url", "")).strip()
+            f["all_source_urls"] = [new_url] if new_url else []
+            f["source_count"] = 1
+            unique_map[key] = f
 
-    log.debug(f"Deduplicated {len(facilities)} → {len(merged)} unique facilities")
-    return merged
+    # Apply cross-source corroboration boost (silently — keep basis clean)
+    for entry in unique_map.values():
+        src_count = entry.get("source_count", 1)
+        if src_count >= 2:
+            old_conf = entry.get("confidence", "ESTIMATED")
+            new_conf = _boost_confidence(old_conf, src_count)
+            if old_conf != new_conf:
+                entry["confidence"] = new_conf
+                entry["confidence_boost_reason"] = f"{src_count} independent sources"
+
+    return list(unique_map.values())
