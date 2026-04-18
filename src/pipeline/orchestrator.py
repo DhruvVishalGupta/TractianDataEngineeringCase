@@ -114,8 +114,10 @@ def process_company(company: Company, on_progress=None) -> tuple[list[dict], dic
     _p("scrape", f"Fetching {len(facility_urls) or 'fallback'} candidate pages via Firecrawl")
     if facility_urls:
         scraped_pages = scrape_urls(name, facility_urls, website=website)
-    else:
+    elif website:
         scraped_pages = scrape_company_domain(name, website)
+    else:
+        scraped_pages = []
 
     pages_with_urls = list(scraped_pages)
     if edgar_text:

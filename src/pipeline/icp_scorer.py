@@ -35,6 +35,10 @@ def _sanitize_display(text: str) -> str:
     s = re.sub(r"\|[a-z_]+=\S*", "", s)
     s = re.sub(r"\b(first|last|date|url|title|access[-_]?date)=\S*", "", s)
     s = s.replace("}}", "").replace("{{", "")
+    # Pipes are wikitext field separators — any that survive the targeted regexes
+    # above are leftover noise. Drop them so downstream renderers can safely
+    # treat `|` as a structural separator.
+    s = s.replace("|", " ")
     s = re.sub(r"\s+", " ", s).strip().strip("|").strip()
     return s if s else ""
 
@@ -478,7 +482,7 @@ def build_plain_english(
     else:
         parts.append("RECOMMENDATION: Disqualify — outside Tractian's ICP.")
 
-    return " | ".join(parts)
+    return "\n".join(parts)
 
 
 def calculate_icp_score(

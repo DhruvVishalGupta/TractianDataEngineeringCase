@@ -31,9 +31,9 @@ class Company:
     """
     name: str
     slug: str
-    website: str
-    is_public: bool
-    sec_ticker: Optional[str]
+    website: str = ""
+    is_public: bool = True
+    sec_ticker: Optional[str] = None
 
     def __repr__(self) -> str:
         return f"Company(name={self.name!r}, slug={self.slug!r})"

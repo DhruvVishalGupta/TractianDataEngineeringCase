@@ -49,9 +49,14 @@ def _load_data() -> dict:
 
     if cache_stale:
         if DATA_PATH.exists():
-            with open(DATA_PATH, encoding="utf-8") as f:
-                _data_cache = json.load(f)
-            _data_cache_mtime = current_mtime
+            try:
+                with open(DATA_PATH, encoding="utf-8") as f:
+                    _data_cache = json.load(f)
+                _data_cache_mtime = current_mtime
+            except json.JSONDecodeError:
+                # File was mid-write (race condition); serve stale cache if available
+                if _data_cache is None:
+                    _data_cache = {"metadata": {}, "companies": [], "flat_rows": []}
         else:
             _data_cache = {"metadata": {}, "companies": [], "flat_rows": []}
             _data_cache_mtime = None
@@ -59,10 +64,12 @@ def _load_data() -> dict:
 
 
 def _persist_data(data: dict) -> None:
-    """Write updated dataset back to disk; invalidate in-memory cache."""
+    """Write to a temp file then atomically replace, so readers never see a partial write."""
     global _data_cache, _data_cache_mtime
-    with open(DATA_PATH, "w", encoding="utf-8") as f:
+    tmp = DATA_PATH.with_suffix(".tmp")
+    with open(tmp, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2, default=str)
+    tmp.replace(DATA_PATH)  # atomic on both POSIX and Windows
     _data_cache = data
     _data_cache_mtime = DATA_PATH.stat().st_mtime
 
@@ -205,9 +212,6 @@ _jobs_lock = threading.Lock()
 
 class ProcessRequest(BaseModel):
     name: str = Field(..., min_length=2, max_length=80)
-    website: str = Field(..., min_length=3, max_length=120)
-    is_public: bool = True
-    sec_ticker: Optional[str] = None
 
 
 STAGE_ORDER = [
@@ -235,8 +239,12 @@ def _run_live_pipeline(job_id: str, req: ProcessRequest):
         from src.pipeline.companies import Company
         from src.pipeline.orchestrator import process_company
 
+        from src.pipeline.searcher import discover_company_website
+
         slug = re.sub(r"[^a-z0-9]+", "_", req.name.lower()).strip("_") or f"demo-{job_id}"
-        website = re.sub(r"^https?://(www\.)?", "", req.website.strip()).rstrip("/")
+
+        _update_job(job_id, stage="discovery", detail="Discovering website…", status="running")
+        website = discover_company_website(req.name.strip())
 
         _update_job(job_id, stage="discovery", detail="Starting pipeline", status="running")
 
@@ -244,8 +252,6 @@ def _run_live_pipeline(job_id: str, req: ProcessRequest):
             name=req.name.strip(),
             slug=slug,
             website=website,
-            is_public=bool(req.is_public),
-            sec_ticker=(req.sec_ticker or None),
         )
 
         def on_progress(stage: str, detail: str = ""):
@@ -297,8 +303,8 @@ def demo_process(req: ProcessRequest):
     company and its facilities are already merged into outputs/tractian_leads.json
     — the dashboard will see them on its next refresh.
     """
-    if not req.name.strip() or not req.website.strip():
-        raise HTTPException(status_code=400, detail="name and website are required")
+    if not req.name.strip():
+        raise HTTPException(status_code=400, detail="name is required")
 
     job_id = uuid.uuid4().hex[:10]
     with _jobs_lock:
@@ -308,7 +314,6 @@ def demo_process(req: ProcessRequest):
             "stage": "queued",
             "detail": "",
             "company_name": req.name,
-            "website": req.website,
             "created_at": datetime.now(UTC).isoformat(),
             "history": [],
             "result": None,
@@ -326,3 +331,22 @@ def demo_status(job_id: str):
     if not job:
         raise HTTPException(status_code=404, detail=f"Job {job_id} not found")
     return job
+
+
+@app.delete("/companies/{name}")
+def delete_company(name: str):
+    data = _load_data()
+    orig_companies = data.get("companies", [])
+    orig_rows = data.get("flat_rows", [])
+    new_companies = [c for c in orig_companies if c.get("company_name") != name]
+    new_rows = [r for r in orig_rows if r.get("company_name") != name]
+    if len(new_companies) == len(orig_companies):
+        raise HTTPException(status_code=404, detail=f"Company '{name}' not found")
+    data["companies"] = new_companies
+    data["flat_rows"] = new_rows
+    data["metadata"] = data.get("metadata", {}) | {
+        "total_companies": len(new_companies),
+        "total_facilities": len(new_rows),
+    }
+    _persist_data(data)
+    return {"deleted": name, "companies_remaining": len(new_companies)}

@@ -78,28 +78,68 @@ def execute_brave_search(query: str, count: int = 5) -> list[dict]:
         log.warning(f"Brave Search failed for query '{query}': {e}")
         return []
 
-def discover_facility_urls(company_name: str, website: str) -> list[str]:
+def discover_company_website(company_name: str) -> str:
+    """
+    Use Brave Search to find the official website for a company when none is provided.
+    Returns a bare domain like 'exxonmobil.com', or empty string if not found.
+    """
+    cache_key = "brave_website_discovery"
+    if has_raw(company_name, cache_key):
+        cached = load_raw(company_name, cache_key)
+        return cached if isinstance(cached, str) else ""
+
+    queries = [
+        f'"{company_name}" official website',
+        f'{company_name} company homepage',
+    ]
+    for q in queries:
+        results = execute_brave_search(q, count=3)
+        for r in results:
+            url = r.get("url", "")
+            if not url:
+                continue
+            parsed = urlparse(url)
+            netloc = parsed.netloc.lower().removeprefix("www.")
+            # Skip aggregator/reference sites
+            if any(skip in netloc for skip in ["wikipedia", "linkedin", "bloomberg", "reuters", "facebook", "twitter", "youtube"]):
+                continue
+            if netloc:
+                log.info(f"[{company_name}] Auto-discovered website: {netloc}")
+                save_raw(company_name, cache_key, netloc)
+                return netloc
+    log.warning(f"[{company_name}] Could not auto-discover website via Brave")
+    save_raw(company_name, cache_key, "")
+    return ""
+
+
+def discover_facility_urls(company_name: str, website: str = "") -> list[str]:
     """
     Search for URLs highly likely to contain structured facility data,
     using targeted open source intelligence (OSINT) dorks.
+    When website is empty, falls back to company-name-only queries.
     """
     cache_key = "brave_facility_urls"
     if has_raw(company_name, cache_key):
         return load_raw(company_name, cache_key)
-        
-    queries = [
+
+    queries = []
+    if website:
         # On-site: deep links from the company's own website
-        f'site:{website} ("manufacturing plant" OR "processing plant" OR "production facility" OR refinery OR factory)',
-        f'site:{website} ("locations" OR "facilities" OR "operations" OR "where we operate")',
-        f'"{company_name}" "manufacturing plant" site:{website}',
-        f'"{company_name}" "processing plant" site:{website}',
-        f'"{company_name}" "distribution center" site:{website}',
-        # Off-site: third-party facility lists, Wikipedia, press releases
+        queries += [
+            f'site:{website} ("manufacturing plant" OR "processing plant" OR "production facility" OR refinery OR factory)',
+            f'site:{website} ("locations" OR "facilities" OR "operations" OR "where we operate")',
+            f'"{company_name}" "manufacturing plant" site:{website}',
+            f'"{company_name}" "processing plant" site:{website}',
+            f'"{company_name}" "distribution center" site:{website}',
+        ]
+    # Off-site: third-party facility lists, Wikipedia, press releases
+    queries += [
         f'"{company_name}" facilities list site:wikipedia.org',
         f'"{company_name}" "plant locations" OR "manufacturing locations" OR "facility locations"',
-        f'"{company_name}" plant OR factory OR refinery OR mill filetype:html -site:{website}',
+        f'"{company_name}" plant OR factory OR refinery OR mill filetype:html',
+        f'"{company_name}" manufacturing facilities operations',
     ]
-    
+
     found_urls = set()
     for q in queries:
         results = execute_brave_search(q, count=3)
@@ -107,7 +147,7 @@ def discover_facility_urls(company_name: str, website: str) -> list[str]:
             url = r.get("url", "")
             if url and not url.endswith(".pdf"):
                 found_urls.add(url)
-                
+
     def _url_rank(u: str) -> int:
         lower = u.lower()
         rank = 0
@@ -115,7 +155,7 @@ def discover_facility_urls(company_name: str, website: str) -> list[str]:
             rank += 3
         if any(k in lower for k in ["careers", "investor", "newsroom", "press", "blog", "contact"]):
             rank -= 2
-        if website.lower() in lower:
+        if website and website.lower() in lower:
             rank += 2
         return rank
 
@@ -337,7 +377,7 @@ def discover_firmographics(company_name: str) -> dict:
     return data
 
 
-def discover_market_research(company_name: str, website: str) -> dict:
+def discover_market_research(company_name: str, website: str = "") -> dict:
     """
     Collect market-facing operational signals that indicate Tractian relevance:
     maintenance maturity, reliability programs, industrial operations, and capex/opex posture.
@@ -350,8 +390,9 @@ def discover_market_research(company_name: str, website: str) -> dict:
         f'"{company_name}" maintenance reliability operations',
         f'"{company_name}" predictive maintenance condition monitoring',
         f'"{company_name}" plant downtime asset performance',
-        f'site:{website} maintenance reliability manufacturing operations',
     ]
+    if website:
+        queries.append(f'site:{website} maintenance reliability manufacturing operations')
 
     snippets: list[dict] = []
     for q in queries:
