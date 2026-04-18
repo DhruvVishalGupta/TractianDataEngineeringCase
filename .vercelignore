@@ -5,9 +5,12 @@
 requirements.txt
 src/api/
 src/pipeline/
-data/
-outputs/
-logs/
+# NOTE: leading slash anchors to repo root so we don't also exclude
+# src/dashboard/public/data/ (which holds the bundled snapshot used by
+# the static deploy). Same for outputs/ and logs/.
+/data/
+/outputs/
+/logs/
 *.py
 __pycache__/
 .venv/
