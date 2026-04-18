@@ -1,19 +1,23 @@
 # Tractian GTM — Sales Intelligence Pipeline
 
-Given a company name and website, this pipeline returns a 1–10 ICP fit score plus a CRM-ready list of every facility that company operates, with source attribution and confidence per row.
+Given just a company name, this pipeline returns a 1–10 ICP fit score plus a CRM-ready list of every facility that company operates, with source attribution and confidence per row. Website and ticker are auto-discovered.
 
-**20 companies · 240 facilities · 31 countries · 100% geocoded**
+**21 companies · 246 facilities · 31 countries · 100% geocoded**
+
+🔗 **Live dashboard (hosted snapshot):** https://tractiandataengineeringcase.vercel.app
+🔗 **Repo:** https://github.com/DhruvVishalGupta/TractianDataEngineeringCase
 
 ---
 
 ## How it works
 
 ```
-  { name, website, ticker? }
-            │
-            ▼
+       { name }
+          │
+          ▼
   ┌──────────────────────────────────────────────┐
   │  1. DISCOVERY                                 │
+  │    Brave Search — auto-discover website       │
   │    Brave Search (site-scoped OSINT dorks)     │
   │    SEC EDGAR 10-K / 20-F Item 2 Properties    │
   │    Wikipedia API (firmographics)              │
@@ -78,7 +82,9 @@ npm run dev
 Dashboard: http://localhost:5173
 
 ### Live demo
-Click **"+ Add company (live demo)"** in the dashboard — any new company you enter runs the full pipeline in-browser and appears in the table and map when done.
+Two options:
+- **Hosted snapshot** (read-only): open the live dashboard URL above. All 21 companies / 246 facilities are browsable with filters, map, and per-facility drill-down. The "Add company" button is disabled — running the full pipeline needs API keys and is local-only.
+- **Local live demo** (full pipeline): with both servers running, click **"+ Add company (live demo)"** and type any company name. The pipeline auto-discovers the website, crawls OSINT sources, scores it, and appends it to the dashboard in real time.
 
 ---
 
@@ -97,9 +103,13 @@ Click **"+ Add company (live demo)"** in the dashboard — any new company you e
 ```
 src/
 ├── pipeline/      # the 20 modules that make up the pipeline
-├── api/           # FastAPI backend
+├── api/           # FastAPI backend (live + snapshot data, DELETE endpoint)
 └── dashboard/     # Vite + React SPA
+    └── public/data/  # bundled snapshot used by the hosted build
 
-data/raw/          # per-company response cache (auto-created)
+data/raw/          # per-company OSINT cache (auto-created, gitignored)
 outputs/           # final CSV / XLSX / JSON
+
+vercel.json        # static-snapshot deploy config
+.vercelignore      # excludes Python pipeline from frontend build
 ```
