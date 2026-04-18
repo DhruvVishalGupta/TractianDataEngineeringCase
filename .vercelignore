@@ -1,0 +1,18 @@
+# The Vercel deploy is a static snapshot of the React dashboard only.
+# Everything below is local-pipeline / Python tooling that should never
+# get uploaded to the build machine (and must not trigger Python detection).
+
+requirements.txt
+src/api/
+src/pipeline/
+data/
+outputs/
+logs/
+*.py
+__pycache__/
+.venv/
+venv/
+
+# Docs / planning — not needed for the deploy.
+.planning/
+.claude/
