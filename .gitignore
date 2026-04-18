@@ -47,3 +47,6 @@ Thumbs.db
 # Dashboard dependencies / build artifacts
 src/dashboard/node_modules/
 src/dashboard/dist/
+
+# Claude Code local state (editor tooling — not project artifacts)
+.claude/

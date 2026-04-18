@@ -2,6 +2,12 @@ import { useState, useEffect, useMemo, useRef, Fragment } from 'react';
 import './App.css';
 
 const API_BASE = 'http://localhost:8000';
+const STATIC_DATA_URL = `${import.meta.env.BASE_URL}data/tractian_leads.json`;
+const STATIC_CSV_URL  = `${import.meta.env.BASE_URL}data/tractian_leads.csv`;
+
+// Single source of truth for whether we're running off a live FastAPI backend
+// or a static bundle (Vercel deploy). Detected once on first load.
+let STATIC_MODE = false;
 
 const CONFIDENCE_RANK = { HIGH: 4, MED: 3, LOW: 2, ESTIMATED: 1 };
 
@@ -35,7 +41,10 @@ function parseIcpReasoning(breakdown) {
     ? (() => { try { return JSON.parse(breakdown)?.plain_english; } catch { return ''; } })()
     : breakdown?.plain_english;
   if (!text) return null;
-  const parts = text.split('|').map(p => p.trim()).filter(Boolean);
+  // Split on newlines OR ' | ' separators — require whitespace around the pipe
+  // so that literal pipes inside evidence text (e.g. "10-K|2024") don't split a
+  // dimension in half.
+  const parts = text.split(/\n|\s+\|\s+/).map(p => p.trim()).filter(Boolean);
   const summary = parts[0] || '';
   const dims = parts.slice(1).filter(p => !p.toUpperCase().startsWith('RECOMMENDATION:'));
   const rec = parts.find(p => p.toUpperCase().startsWith('RECOMMENDATION:'));
@@ -115,13 +124,31 @@ function downloadFilteredJSON(rows) {
 }
 
 async function downloadFullCSV() {
-  const r = await fetch(`${API_BASE}/download/csv`);
-  if (!r.ok) { alert('Full CSV unavailable — re-run the pipeline first.'); return; }
+  // Try the live API first; fall back to the bundled static CSV in Vercel deploys.
+  const url = STATIC_MODE ? STATIC_CSV_URL : `${API_BASE}/download/csv`;
+  const r = await fetch(url);
+  if (!r.ok) {
+    if (!STATIC_MODE) {
+      // API absent — try the static bundle once before giving up.
+      const r2 = await fetch(STATIC_CSV_URL);
+      if (r2.ok) {
+        const blob = await r2.blob();
+        triggerDownload(blob, `tractian_leads_${new Date().toISOString().slice(0,10)}.csv`, 'text/csv');
+        return;
+      }
+    }
+    alert('Full CSV unavailable — re-run the pipeline first.');
+    return;
+  }
   const blob = await r.blob();
   triggerDownload(blob, `tractian_leads_${new Date().toISOString().slice(0,10)}.csv`, 'text/csv');
 }
 
 async function downloadFullXLSX() {
+  if (STATIC_MODE) {
+    alert('XLSX export is only available when the pipeline backend is running locally. Use CSV or JSON here, or clone the GitHub repo to regenerate the styled XLSX.');
+    return;
+  }
   const r = await fetch(`${API_BASE}/download/xlsx`);
   if (!r.ok) { alert('Full XLSX unavailable — re-run the pipeline first.'); return; }
   const blob = await r.blob();
@@ -174,15 +201,12 @@ function ExportMenu({ filtered, totalCount }) {
 // ── Live-demo modal ──────────────────────────────────────────────────────
 function LiveDemoModal({ open, onClose, job, setJob, onComplete }) {
   const [name, setName] = useState('');
-  const [website, setWebsite] = useState('');
-  const [isPublic, setIsPublic] = useState(true);
-  const [ticker, setTicker] = useState('');
   const [submitting, setSubmitting] = useState(false);
   const pollingRef = useRef(null);
 
   useEffect(() => {
     if (!open) {
-      setName(''); setWebsite(''); setIsPublic(true); setTicker('');
+      setName('');
       setSubmitting(false);
       setJob(null);
       if (pollingRef.current) clearInterval(pollingRef.current);
@@ -190,18 +214,13 @@ function LiveDemoModal({ open, onClose, job, setJob, onComplete }) {
   }, [open, setJob]);
 
   const submit = async () => {
-    if (!name.trim() || !website.trim()) return;
+    if (!name.trim()) return;
     setSubmitting(true);
     try {
       const resp = await fetch(`${API_BASE}/demo/process`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          name: name.trim(),
-          website: website.trim(),
-          is_public: isPublic,
-          sec_ticker: (isPublic && ticker.trim()) ? ticker.trim().toUpperCase() : null,
-        }),
+        body: JSON.stringify({ name: name.trim() }),
       });
       if (!resp.ok) {
         const txt = await resp.text();
@@ -251,36 +270,15 @@ function LiveDemoModal({ open, onClose, job, setJob, onComplete }) {
           <div className="form-row">
             <label>
               <span>Company name</span>
-              <input type="text" className="input" placeholder="e.g. ExxonMobil"
+              <input type="text" className="input" placeholder="Company name"
                      value={name} onChange={e => setName(e.target.value)}
-                     disabled={!canEdit} autoFocus />
+                     disabled={!canEdit} autoFocus
+                     onKeyDown={e => { if (e.key === 'Enter' && canEdit && !submitting) submit(); }} />
             </label>
-          </div>
-          <div className="form-row">
-            <label>
-              <span>Website</span>
-              <input type="text" className="input" placeholder="e.g. exxonmobil.com"
-                     value={website} onChange={e => setWebsite(e.target.value)}
-                     disabled={!canEdit} />
-            </label>
-          </div>
-          <div className="form-row form-row-split">
-            <label className="checkbox-row">
-              <input type="checkbox" checked={isPublic} onChange={e => setIsPublic(e.target.checked)} disabled={!canEdit} />
-              <span>Public company (has SEC filings)</span>
-            </label>
-            {isPublic && (
-              <label>
-                <span>SEC ticker (optional)</span>
-                <input type="text" className="input input-short" placeholder="XOM"
-                       value={ticker} onChange={e => setTicker(e.target.value.toUpperCase().slice(0, 6))}
-                       disabled={!canEdit} />
-              </label>
-            )}
           </div>
 
           {!job && (
-            <button className="btn-primary modal-submit" disabled={submitting || !name.trim() || !website.trim()}
+            <button className="btn-primary modal-submit" disabled={submitting || !name.trim()}
                     onClick={submit}>
               {submitting ? 'Starting…' : 'Run live pipeline'}
             </button>
@@ -497,28 +495,61 @@ function App() {
   const [focusTarget, setFocusTarget] = useState(null);
   const [demoOpen, setDemoOpen] = useState(false);
   const [demoJob, setDemoJob] = useState(null);       // current live-demo job state
+  const [staticMode, setStaticMode] = useState(STATIC_MODE);
   const refetchRef = useRef(null);
 
   useEffect(() => {
-    const fetchData = () => {
-      Promise.all([
-        fetch(`${API_BASE}/companies`).then(r => r.json()),
-        fetch(`${API_BASE}/leads?limit=2000`).then(r => r.json()),
-      ])
-        .then(([c, l]) => {
+    // Shape the raw JSON bundle (from /data/tractian_leads.json) to match the
+    // API's /companies + /leads responses so the rest of the app is unchanged.
+    const shapeFromStaticBundle = (raw) => {
+      const companiesOut = (raw.companies || [])
+        .map(c => ({
+          company_name: c.company_name,
+          website: c.website || '',
+          icp_score: c.icp_score ?? 0,
+          facility_count: (c.facilities || []).length,
+          score_breakdown: c.score_breakdown || {},
+        }))
+        .sort((a, b) => (b.icp_score ?? 0) - (a.icp_score ?? 0));
+      return { companies: companiesOut, leads: raw.flat_rows || [] };
+    };
+
+    const fetchData = async () => {
+      // In static mode we've already proven the API doesn't exist — skip the
+      // attempt to avoid the browser's noisy CORS/connection errors on every poll.
+      if (!STATIC_MODE) {
+        try {
+          const [c, l] = await Promise.all([
+            fetch(`${API_BASE}/companies`).then(r => r.ok ? r.json() : Promise.reject()),
+            fetch(`${API_BASE}/leads?limit=2000`).then(r => r.ok ? r.json() : Promise.reject()),
+          ]);
           setCompanies(c || []);
           setLeads(l.leads || []);
           setLoading(false);
-        })
-        .catch(err => {
-          console.error(err);
-          setError('API unreachable on port 8000. Run: uvicorn src.api.main:app --reload --port 8000');
-          setLoading(false);
-        });
+          return;
+        } catch {
+          // API unreachable — try the static bundle once. If that works we
+          // latch into static mode for the rest of the session.
+        }
+      }
+      try {
+        const raw = await fetch(STATIC_DATA_URL).then(r => r.json());
+        const { companies: cc, leads: ll } = shapeFromStaticBundle(raw);
+        STATIC_MODE = true;
+        setStaticMode(true);
+        setCompanies(cc);
+        setLeads(ll);
+        setLoading(false);
+      } catch (err) {
+        console.error(err);
+        setError('Data unavailable. Start the backend (uvicorn src.api.main:app --reload --port 8000) or rebuild with /data/tractian_leads.json bundled.');
+        setLoading(false);
+      }
     };
     refetchRef.current = fetchData;
     fetchData();
-    const id = setInterval(fetchData, 30000);
+    // Only poll when we have a live API — static data never changes.
+    const id = setInterval(() => { if (!STATIC_MODE) fetchData(); }, 30000);
     return () => clearInterval(id);
   }, []);
 
@@ -657,9 +688,15 @@ function App() {
           ))}
         </div>
         <ExportMenu filtered={filtered} totalCount={leads.length} />
-        <button className="btn-live-demo" onClick={() => setDemoOpen(true)}>
-          + Add company (live demo)
-        </button>
+        {staticMode ? (
+          <span className="static-badge" title="This is a hosted snapshot. The live pipeline (Brave/EDGAR/Firecrawl/Claude) runs locally — see GitHub.">
+            snapshot demo
+          </span>
+        ) : (
+          <button className="btn-live-demo" onClick={() => setDemoOpen(true)}>
+            + Add company (live demo)
+          </button>
+        )}
       </div>
 
       <div className={`main view-${view}`}>
@@ -696,10 +733,13 @@ function App() {
                         >
                           <td className="company-cell">
                             <span className="expand-icon">{isExp ? '▾' : '▸'}</span>
-                            <a href={`https://${c.website}`} target="_blank" rel="noopener noreferrer"
-                               onClick={e => e.stopPropagation()}>
-                              {c.company_name}
-                            </a>
+                            {c.company_name}
+                            {c.website && (
+                              <a href={`https://${c.website}`} target="_blank" rel="noopener noreferrer"
+                                 className="company-ext-link" onClick={e => e.stopPropagation()}>
+                                ↗
+                              </a>
+                            )}
                           </td>
                           <td className="score-cell">
                             <span className="icp-badge" style={{ background: icpColor(c.icp_score) }}>

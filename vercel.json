@@ -1,0 +1,9 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "buildCommand": "cd src/dashboard && npm install && npm run build",
+  "outputDirectory": "src/dashboard/dist",
+  "framework": null,
+  "rewrites": [
+    { "source": "/((?!data/|assets/).*)", "destination": "/index.html" }
+  ]
+}

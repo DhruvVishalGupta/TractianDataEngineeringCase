@@ -240,6 +240,22 @@ body {
 
 .btn-live-demo:active { transform: scale(0.97); }
 
+.static-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 0.35rem 0.7rem;
+  border-radius: 999px;
+  background: #f1f5f9;
+  color: var(--text-2);
+  border: 1px solid var(--border);
+  font-size: 0.72rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  margin-left: 0.4rem;
+  cursor: help;
+}
+
 .btn-secondary {
   background: var(--surface);
   color: var(--text);
@@ -706,6 +722,18 @@ body {
 
 .company-cell a:hover { border-bottom-color: var(--accent); }
 
+.company-ext-link {
+  margin-left: 0.35rem;
+  font-size: 0.7rem;
+  opacity: 0.45;
+  vertical-align: middle;
+  border-bottom: none !important;
+}
+
+.company-ext-link:hover {
+  opacity: 0.9;
+}
+
 .score-cell {
   font-weight: 700;
   text-align: center;
@@ -735,6 +763,8 @@ body {
   display: flex;
   flex-direction: column;
   gap: 0.3rem;
+  min-width: 0;
+  overflow: hidden;
 }
 
 .reasoning-summary {
@@ -746,14 +776,16 @@ body {
 
 .reasoning-dimensions {
   display: grid;
-  grid-template-columns: max-content max-content 1fr;
+  grid-template-columns: minmax(0, max-content) minmax(0, max-content) minmax(100px, 1fr);
   gap: 0.18rem 0.5rem;
   align-items: baseline;
   font-size: 0.74rem;
   line-height: 1.35;
+  width: 100%;
+  overflow: hidden;
 }
 
-.dim-label  { font-weight: 700; color: var(--text); }
+.dim-label  { font-weight: 700; color: var(--text); white-space: nowrap; }
 .dim-score {
   background: #e2e8f0;
   color: var(--text);
@@ -762,8 +794,9 @@ body {
   font-size: 0.65rem;
   font-weight: 700;
   text-align: center;
+  white-space: nowrap;
 }
-.dim-detail { color: var(--text-2); }
+.dim-detail { color: var(--text-2); min-width: 0; word-break: break-word; }
 
 .recommendation-pill {
   align-self: flex-start;
